@@ -1,0 +1,25 @@
+---
+
+registry: localhost:5000
+organization: meridio
+tag: latest
+pullPolicy: IfNotPresent
+
+loadBalancerImage: load-balancer
+loadBalancerVersion: latest
+
+proxyImage: proxy
+proxyVersion: latest
+
+targetImage: target
+targetVersion: latest
+
+ipamImage: ipam
+ipamVersion: latest
+ipamPort: 7777
+ipamTargetPort: 7777
+
+nspImage: nsp
+nspVersion: latest
+nspPort: 7778
+nspTargetPort: 7778
