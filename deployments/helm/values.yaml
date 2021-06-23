@@ -1,25 +1,60 @@
 ---
 
-registry: localhost:5000
-organization: meridio
+registry: registry.nordix.org
+organization: cloud-native/meridio
 tag: latest
 pullPolicy: IfNotPresent
 
-loadBalancerImage: load-balancer
-loadBalancerVersion: latest
+loadBalancer:
+  image: load-balancer
+  version: latest
+  networkServiceName: load-balancer
 
-proxyImage: proxy
-proxyVersion: latest
+proxy:
+  image: proxy
+  version: latest
+  networkServiceName: proxy
 
-targetImage: target
-targetVersion: latest
+target:
+  image: target
+  version: latest
 
-ipamImage: ipam
-ipamVersion: latest
-ipamPort: 7777
-ipamTargetPort: 7777
+ctraffic:
+  image: ctraffic
+  version: latest
 
-nspImage: nsp
-nspVersion: latest
-nspPort: 7778
-nspTargetPort: 7778
+ipam:
+  image: ipam
+  version: latest
+  port: 7777
+  targetPort: 7777
+
+nsp:
+  image: nsp
+  version: latest
+  port: 7778
+  targetPort: 7778
+
+ipFamily: ipv4 # ipv4 / ipv6 / dualstack
+
+vip:
+  ipv4: 20.0.0.1/32
+  ipv6: 2000::1/128
+
+subnetPool:
+  ipv4: 172.16.0.0/16
+  ipv6: fd00::/48
+  prefixLength:
+    ipv4: 24
+    ipv6: 64
+
+vlanNSE:
+  image: cmd-nse-icmp-responder
+  version: latest
+
+vlan:
+  networkServiceName: external-vlan
+  id: 100
+  interface: eth0
+  ipv4Prefix: 169.254.100.0/24
+  ipv6Prefix: 100:100::/64

@@ -12,18 +12,18 @@ type NetworkServicePlateformClient struct {
 	networkServicePlateformClient nspAPI.NetworkServicePlateformServiceClient
 }
 
-func (nspc *NetworkServicePlateformClient) Register(ip string, targetContext map[string]string) error {
+func (nspc *NetworkServicePlateformClient) Register(ips []string, targetContext map[string]string) error {
 	target := &nspAPI.Target{
-		Ip:      ip,
+		Ips:     ips,
 		Context: targetContext,
 	}
 	_, err := nspc.networkServicePlateformClient.Register(context.Background(), target)
 	return err
 }
 
-func (nspc *NetworkServicePlateformClient) Unregister(ip string) error {
+func (nspc *NetworkServicePlateformClient) Unregister(ips []string) error {
 	target := &nspAPI.Target{
-		Ip: ip,
+		Ips: ips,
 	}
 	_, err := nspc.networkServicePlateformClient.Unregister(context.Background(), target)
 	return err
@@ -33,12 +33,19 @@ func (nspc *NetworkServicePlateformClient) Monitor() (nspAPI.NetworkServicePlate
 	return nspc.networkServicePlateformClient.Monitor(context.Background(), &empty.Empty{})
 }
 
-func (nspc *NetworkServicePlateformClient) GetTargets() error {
-	return nil
+func (nspc *NetworkServicePlateformClient) GetTargets() ([]*nspAPI.Target, error) {
+	GetTargetsResponse, err := nspc.networkServicePlateformClient.GetTargets(context.Background(), &empty.Empty{})
+	if err != nil {
+		return nil, err
+	}
+	return GetTargetsResponse.Targets, nil
 }
 
 func (nspc *NetworkServicePlateformClient) connect(ipamServiceIPPort string) error {
-	conn, err := grpc.Dial(ipamServiceIPPort, grpc.WithInsecure())
+	conn, err := grpc.Dial(ipamServiceIPPort, grpc.WithInsecure(),
+		grpc.WithDefaultCallOptions(
+			grpc.WaitForReady(true),
+		))
 	if err != nil {
 		return nil
 	}
