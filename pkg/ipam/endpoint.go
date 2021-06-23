@@ -81,8 +81,8 @@ func (ie *IpamEndpoint) Request(ctx context.Context, request *networkservice.Net
 	sourceIP := fmt.Sprintf("%s/%d", srcIP.IP.String(), ie.prefixLengthRequest)
 	destinationIP := fmt.Sprintf("%s/%d", dstIP.IP.String(), ie.prefixLengthRequest)
 
-	ipContext.SrcIpAddr = sourceIP
-	ipContext.DstIpAddr = destinationIP
+	ipContext.SrcIpAddrs = []string{sourceIP}
+	ipContext.DstIpAddrs = []string{destinationIP}
 
 	return next.Server(ctx).Request(ctx, request)
 }

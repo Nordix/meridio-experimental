@@ -8,59 +8,55 @@ import (
 
 	"github.com/nordix/meridio/pkg/networking"
 	"github.com/sirupsen/logrus"
-	"github.com/vishvananda/netlink"
 )
 
 // LoadBalancer -
 type LoadBalancer struct {
-	m       int
-	n       int
-	nfQueue *networking.NFQueue
-	vip     *netlink.Addr
-	targets map[int]*configuredTarget // key: Identifier
-}
-
-type configuredTarget struct {
-	target *Target
-	fwMark *networking.FWMarkRoute
+	m        int
+	n        int
+	vips     []*virtualIP
+	targets  map[int]*Target // key: Identifier
+	netUtils networking.Utils
 }
 
 // Start -
 func (lb *LoadBalancer) Start() error {
-	return exec.Command("lb", "run", "-p").Start()
+	return exec.Command("nfqlb", "lb", "--qlength=1024").Start()
 }
 
 // AddTarget -
 func (lb *LoadBalancer) AddTarget(target *Target) error {
-	if lb.TargetExists(target) == true {
-		return errors.New("The target is already existing.")
+	if lb.TargetExists(target) {
+		return errors.New("the target is already existing")
 	}
-	fwMark, err := networking.NewFWMarkRoute(target.ip, target.identifier, target.identifier)
+	err := target.Configure(lb.netUtils)
 	if err != nil {
 		return err
 	}
 	err = lb.activateIdentifier(target.identifier)
 	if err != nil {
-		return fmt.Errorf("%w; activateIdentifier: %v", err, target.identifier)
+		returnErr := err
+		err = target.Delete()
+		if err != nil {
+			return fmt.Errorf("%w; target.Delete: %v", err, target.identifier)
+		}
+		return fmt.Errorf("%w; activateIdentifier: %v", returnErr, target.identifier)
 	}
-	lb.targets[target.identifier] = &configuredTarget{
-		target: target,
-		fwMark: fwMark,
-	}
+	lb.targets[target.identifier] = target
 	return nil
 }
 
 // RemoveTarget -
 func (lb *LoadBalancer) RemoveTarget(target *Target) error {
-	if lb.TargetExists(target) == false {
-		return errors.New("The target does not exist.")
+	if !lb.TargetExists(target) {
+		return errors.New("the target does not exist")
 	}
-	configuredTarget, _ := lb.targets[target.identifier]
-	err := configuredTarget.fwMark.Delete()
+	t := lb.targets[target.identifier]
+	err := t.Delete()
 	if err != nil {
 		return err
 	}
-	err = lb.desactivateIdentifier(target.identifier)
+	err = lb.deactivateIdentifier(target.identifier)
 	if err != nil {
 		return err
 	}
@@ -74,33 +70,44 @@ func (lb *LoadBalancer) TargetExists(target *Target) bool {
 	return exists
 }
 
-func (lb *LoadBalancer) activateIdentifier(identifier int) error {
-	_, err := exec.Command("lb", "activate", strconv.Itoa(identifier)).Output()
-	return err
-}
-
-func (lb *LoadBalancer) desactivateIdentifier(identifier int) error {
-	_, err := exec.Command("lb", "deactivate", strconv.Itoa(identifier)).Output()
-	return err
-}
-
-func (lb *LoadBalancer) configure() {
-	_, err := exec.Command("lb",
-		"create",
-		strconv.Itoa(lb.m),
-		strconv.Itoa(lb.n)).Output()
-	lb.desactivateAll()
-
-	nfqueue, err := networking.NewNFQueue(lb.vip, 2)
-	if err != nil {
-		logrus.Errorf("Load Balancer: error configuring nfqueue (iptables): %v", err)
+// TargetExists -
+func (lb *LoadBalancer) GetTargets() []*Target {
+	targets := []*Target{}
+	for _, target := range lb.targets {
+		targets = append(targets, target)
 	}
-	lb.nfQueue = nfqueue
+	return targets
+}
+
+func (lb *LoadBalancer) activateIdentifier(identifier int) error {
+	_, err := exec.Command("nfqlb", "activate", fmt.Sprintf("--lookup=%s", strconv.Itoa(identifier)), strconv.Itoa(identifier)).Output()
+	return err
+}
+
+func (lb *LoadBalancer) deactivateIdentifier(identifier int) error {
+	_, err := exec.Command("nfqlb", "deactivate", fmt.Sprintf("--lookup=%s", strconv.Itoa(identifier))).Output()
+	return err
+}
+
+func (lb *LoadBalancer) configure() error {
+	_, err := exec.Command("nfqlb",
+		"init",
+		"--ownfw=0",
+		fmt.Sprintf("--M=%s", strconv.Itoa(lb.m)),
+		fmt.Sprintf("--N=%s", strconv.Itoa(lb.n))).Output()
+	if err != nil {
+		return err
+	}
+	err = lb.desactivateAll()
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (lb *LoadBalancer) desactivateAll() error {
-	for i := 1; i <= lb.n; i++ {
-		err := lb.desactivateIdentifier(i)
+	for i := 0; i < lb.n; i++ {
+		err := lb.deactivateIdentifier(i)
 		if err != nil {
 			return err
 		}
@@ -108,13 +115,48 @@ func (lb *LoadBalancer) desactivateAll() error {
 	return nil
 }
 
-func NewLoadBalancer(vip *netlink.Addr, m int, n int) *LoadBalancer {
-	loadBalancer := &LoadBalancer{
-		m:       m,
-		n:       n,
-		vip:     vip,
-		targets: make(map[int]*configuredTarget),
+func (lb *LoadBalancer) SetVIPs(vips []string) {
+	currentVIPs := make(map[string]*virtualIP)
+	for _, vip := range lb.vips {
+		currentVIPs[vip.prefix] = vip
 	}
-	loadBalancer.configure()
-	return loadBalancer
+	for _, vip := range vips {
+		if _, ok := currentVIPs[vip]; !ok {
+			newVIP, err := newVirtualIP(vip, lb.netUtils)
+			if err != nil {
+				logrus.Errorf("Load Balancer: Error adding SourceBaseRoute: %v", err)
+				continue
+			}
+			lb.vips = append(lb.vips, newVIP)
+		}
+		delete(currentVIPs, vip)
+	}
+	// delete remaining vips
+	for index := 0; index < len(lb.vips); index++ {
+		vip := lb.vips[index]
+		if _, ok := currentVIPs[vip.prefix]; ok {
+			lb.vips = append(lb.vips[:index], lb.vips[index+1:]...)
+			index--
+			err := vip.Delete()
+			if err != nil {
+				logrus.Errorf("Load Balancer: Error deleting vip: %v", err)
+			}
+		}
+	}
+}
+
+func NewLoadBalancer(vips []string, m int, n int, netUtils networking.Utils) (*LoadBalancer, error) {
+	loadBalancer := &LoadBalancer{
+		m:        m,
+		n:        n,
+		vips:     []*virtualIP{},
+		targets:  make(map[int]*Target),
+		netUtils: netUtils,
+	}
+	loadBalancer.SetVIPs(vips)
+	err := loadBalancer.configure()
+	if err != nil {
+		return nil, err
+	}
+	return loadBalancer, nil
 }

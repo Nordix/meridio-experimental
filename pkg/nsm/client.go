@@ -4,21 +4,14 @@ import (
 	"context"
 
 	"github.com/edwarnicke/grpcfd"
-	"github.com/golang/protobuf/ptypes/empty"
-	"github.com/networkservicemesh/api/pkg/api/networkservice"
-	kernelmech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/kernel"
-	vfiomech "github.com/networkservicemesh/api/pkg/api/networkservice/mechanisms/vfio"
 	"github.com/networkservicemesh/api/pkg/api/registry"
-	"github.com/networkservicemesh/sdk-sriov/pkg/networkservice/common/mechanisms/vfio"
-	"github.com/networkservicemesh/sdk-sriov/pkg/networkservice/common/token"
-	"github.com/networkservicemesh/sdk/pkg/networkservice/chains/client"
-	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/kernel"
-	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/sendfd"
+	registryrefresh "github.com/networkservicemesh/sdk/pkg/registry/common/refresh"
+	registrysendfd "github.com/networkservicemesh/sdk/pkg/registry/common/sendfd"
+	registrychain "github.com/networkservicemesh/sdk/pkg/registry/core/chain"
 	"github.com/networkservicemesh/sdk/pkg/tools/grpcutils"
-	"github.com/networkservicemesh/sdk/pkg/tools/nsurl"
 	"github.com/networkservicemesh/sdk/pkg/tools/opentracing"
 	"github.com/networkservicemesh/sdk/pkg/tools/spiffejwt"
-	nsc "github.com/nordix/meridio/pkg/client"
+	"github.com/networkservicemesh/sdk/pkg/tools/token"
 	"github.com/sirupsen/logrus"
 	"github.com/spiffe/go-spiffe/v2/spiffetls/tlsconfig"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
@@ -27,28 +20,14 @@ import (
 	"google.golang.org/grpc/credentials"
 )
 
+// APIClient -
 type APIClient struct {
-	context                       context.Context
-	grpcClient                    *grpc.ClientConn
-	networkServiceClient          networkservice.NetworkServiceClient
-	networkServiceDiscoveryClient registry.NetworkServiceEndpointRegistryClient
-	config                        *nsc.Config
-	x509source                    *workloadapi.X509Source
-}
-
-// Find -
-func (apiClient *APIClient) Find(networkServiceEndpointQuery *registry.NetworkServiceEndpointQuery) (registry.NetworkServiceEndpointRegistry_FindClient, error) {
-	return apiClient.networkServiceDiscoveryClient.Find(apiClient.context, networkServiceEndpointQuery)
-}
-
-// Request -
-func (apiClient *APIClient) Request(networkServiceRequest *networkservice.NetworkServiceRequest) (*networkservice.Connection, error) {
-	return apiClient.networkServiceClient.Request(context.Background(), networkServiceRequest)
-}
-
-// Close -
-func (apiClient *APIClient) Close(connection *networkservice.Connection) (*empty.Empty, error) {
-	return apiClient.networkServiceClient.Close(context.Background(), connection)
+	context                              context.Context
+	GRPCClient                           *grpc.ClientConn
+	config                               *Config
+	x509source                           *workloadapi.X509Source
+	NetworkServiceEndpointRegistryClient registry.NetworkServiceEndpointRegistryClient
+	NetworkServiceRegistryClient         registry.NetworkServiceRegistryClient
 }
 
 func (apiClient *APIClient) getX509Source() *workloadapi.X509Source {
@@ -65,43 +44,16 @@ func (apiClient *APIClient) getX509Source() *workloadapi.X509Source {
 	return source
 }
 
-func (apiClient *APIClient) setNetworkServiceClient() {
-	tokenClient := token.NewClient()
-	sendfdClient := sendfd.NewClient()
-
-	apiClient.networkServiceClient = client.NewClient(
-		apiClient.context,
-		apiClient.config.Name,
-		nil,
-		spiffejwt.TokenGeneratorFunc(apiClient.x509source, apiClient.config.MaxTokenLifetime),
-		apiClient.grpcClient,
-		append(
-			apiClient.getAdditionalFunctionality(),
-			tokenClient,
-			sendfdClient,
-		)...,
+func (apiClient *APIClient) setNetworkServiceEndpointRegistryClient() {
+	apiClient.NetworkServiceEndpointRegistryClient = registrychain.NewNetworkServiceEndpointRegistryClient(
+		registryrefresh.NewNetworkServiceEndpointRegistryClient(),
+		registrysendfd.NewNetworkServiceEndpointRegistryClient(),
+		registry.NewNetworkServiceEndpointRegistryClient(apiClient.GRPCClient),
 	)
 }
 
-func (apiClient *APIClient) setNetworkServiceDiscoveryClient() {
-	apiClient.networkServiceDiscoveryClient = registry.NewNetworkServiceEndpointRegistryClient(apiClient.grpcClient)
-}
-
-func (apiClient *APIClient) getAdditionalFunctionality() []networkservice.NetworkServiceClient {
-	var clients []networkservice.NetworkServiceClient
-
-	u := (*nsurl.NSURL)(&apiClient.config.NetworkServices[0])
-
-	mech := u.Mechanism()
-
-	switch mech.Type {
-	case kernelmech.MECHANISM:
-		clients = append(clients, kernel.NewClient())
-	case vfiomech.MECHANISM:
-		clients = append(clients, vfio.NewClient())
-	}
-
-	return clients
+func (apiClient *APIClient) setNetworkServiceRegistryClient() {
+	apiClient.NetworkServiceRegistryClient = registry.NewNetworkServiceRegistryClient(apiClient.GRPCClient)
 }
 
 func (apiClient *APIClient) dial() {
@@ -112,11 +64,16 @@ func (apiClient *APIClient) dial() {
 	connectCtx, cancel := context.WithTimeout(apiClient.context, apiClient.config.DialTimeout)
 	defer cancel()
 
-	apiClient.grpcClient, err = grpc.DialContext(
+	apiClient.GRPCClient, err = grpc.DialContext(
 		connectCtx,
 		grpcutils.URLToTarget(&apiClient.config.ConnectTo),
 		append(opentracing.WithTracingDial(),
-			grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
+			grpcfd.WithChainStreamInterceptor(),
+			grpcfd.WithChainUnaryInterceptor(),
+			grpc.WithDefaultCallOptions(
+				grpc.WaitForReady(true),
+				grpc.PerRPCCredentials(token.NewPerRPCCredentials(spiffejwt.TokenGeneratorFunc(apiClient.x509source, apiClient.config.MaxTokenLifetime))),
+			),
 			grpc.WithTransportCredentials(
 				grpcfd.TransportCredentials(
 					credentials.NewTLS(
@@ -131,15 +88,15 @@ func (apiClient *APIClient) dial() {
 }
 
 // NewAPIClient -
-func NewAPIClient(ctx context.Context, config *nsc.Config) *APIClient {
+func NewAPIClient(ctx context.Context, config *Config) *APIClient {
 	apiClient := &APIClient{
 		context: ctx,
 		config:  config,
 	}
 
 	apiClient.dial()
-	apiClient.setNetworkServiceClient()
-	apiClient.setNetworkServiceDiscoveryClient()
+	apiClient.setNetworkServiceEndpointRegistryClient()
+	apiClient.setNetworkServiceRegistryClient()
 
 	return apiClient
 }
