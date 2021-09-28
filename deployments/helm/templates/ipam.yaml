@@ -2,23 +2,27 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ipam
+  name: ipam-{{ .Values.trench.name }}
   labels:
-    app: ipam
+    app: ipam-{{ .Values.trench.name }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: ipam
+      app: ipam-{{ .Values.trench.name }}
   template:
     metadata:
       labels:
-        app: ipam
+        app: ipam-{{ .Values.trench.name }}
     spec:
       containers:
         - name: ipam
           image: {{ .Values.registry }}/{{ .Values.organization }}/{{ .Values.ipam.image }}:{{ .Values.ipam.version }}
           imagePullPolicy: {{ .Values.pullPolicy }}
+          readinessProbe:
+{{ toYaml .Values.readinessProbe | indent 12 }}
+          livenessProbe:
+{{ toYaml .Values.livenessProbe | indent 12 }}
           env:
             - name: IPAM_PORT
               value: "{{ .Values.ipam.targetPort }}"

@@ -1,3 +1,19 @@
+/*
+Copyright (c) 2021 Nordix Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package proxy
 
 import (
@@ -31,7 +47,7 @@ func (p *Proxy) InterfaceCreated(intf networking.Iface) {
 	if !p.isNSMInterface(intf) {
 		return
 	}
-	logrus.Infof("Proxy: interface created: %v", intf)
+	logrus.Infof("Proxy: interface created: %v (nexthops: %v)", intf, p.nexthops)
 	// Link the interface to the bridge
 	err := p.bridge.LinkInterface(intf)
 	if err != nil {
@@ -46,7 +62,17 @@ func (p *Proxy) InterfaceCreated(intf networking.Iface) {
 					logrus.Errorf("Proxy: Error adding nexthop: %v", err)
 				}
 			}
-			p.nexthops = append(p.nexthops, ip)
+			// append nexthop if not known
+			add := true
+			for _, nexthop := range p.nexthops {
+				if nexthop == ip {
+					add = false
+					break
+				}
+			}
+			if add {
+				p.nexthops = append(p.nexthops, ip)
+			}
 		}
 	}
 }
@@ -56,7 +82,7 @@ func (p *Proxy) InterfaceDeleted(intf networking.Iface) {
 	if !p.isNSMInterface(intf) {
 		return
 	}
-	logrus.Infof("Proxy: interface removed: %v", intf)
+	logrus.Infof("Proxy: interface removed: %v (nexthops: %v)", intf, p.nexthops)
 	// Unlink the interface from the bridge
 	err := p.bridge.UnLinkInterface(intf)
 	if err != nil {
@@ -71,11 +97,14 @@ func (p *Proxy) InterfaceDeleted(intf networking.Iface) {
 					logrus.Errorf("Proxy: Error removing nexthop: %v", err)
 				}
 			}
-			for index, nexthop := range p.nexthops {
-				if nexthop == ip {
-					p.nexthops = append(p.nexthops[:index], p.nexthops[index+1:]...)
+
+			nexthops := p.nexthops[:0]
+			for _, nexthop := range p.nexthops {
+				if nexthop != ip {
+					nexthops = append(nexthops, nexthop)
 				}
 			}
+			p.nexthops = nexthops
 		}
 	}
 }
@@ -91,6 +120,15 @@ func (p *Proxy) SetIPContext(conn *networkservice.Connection, interfaceType netw
 
 	if conn.GetContext() == nil {
 		conn.Context = &networkservice.ConnectionContext{}
+	}
+
+	// No need to allocate new IPs in case refresh chain component resends Request
+	// belonging to an established connection.
+	// (It is also assumed, that proxy subnets can not change...)
+	if conn.GetContext().GetIpContext() != nil &&
+		conn.GetContext().GetIpContext().GetSrcIpAddrs() != nil &&
+		conn.GetContext().GetIpContext().GetDstIpAddrs() != nil {
+		return nil
 	}
 
 	srcIPAddrs := []string{}
@@ -182,7 +220,7 @@ func (p *Proxy) SetVIPs(vips []string) {
 }
 
 // NewProxy -
-func NewProxy(vips []string, subnets []string, netUtils networking.Utils) *Proxy {
+func NewProxy(subnets []string, netUtils networking.Utils) *Proxy {
 	bridge, err := netUtils.NewBridge("bridge0")
 	if err != nil {
 		logrus.Errorf("Proxy: Error creating the bridge: %v", err)
@@ -201,6 +239,5 @@ func NewProxy(vips []string, subnets []string, netUtils networking.Utils) *Proxy
 	if err != nil {
 		logrus.Errorf("Proxy: Error setting the bridge IP: %v", err)
 	}
-	proxy.SetVIPs(vips)
 	return proxy
 }

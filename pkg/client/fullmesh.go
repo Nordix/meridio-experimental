@@ -1,3 +1,19 @@
+/*
+Copyright (c) 2021 Nordix Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package client
 
 import (
@@ -12,8 +28,8 @@ import (
 	registryrefresh "github.com/networkservicemesh/sdk/pkg/registry/common/refresh"
 	registrysendfd "github.com/networkservicemesh/sdk/pkg/registry/common/sendfd"
 	registrychain "github.com/networkservicemesh/sdk/pkg/registry/core/chain"
+	"github.com/nordix/meridio/pkg/nsm"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/grpc"
 )
 
 type FullMeshNetworkServiceClient struct {
@@ -85,6 +101,8 @@ func (fmnsc *FullMeshNetworkServiceClient) addNetworkServiceClient(networkServic
 	request.Connection.Id = fmt.Sprintf("%s-%s-%d", fmnsc.config.Name, request.Connection.NetworkService, fmnsc.nscIndex)
 	fmnsc.nscIndex++
 	logrus.Infof("Full Mesh Client (%v - %v): event add: %v", request.Connection.Id, request.Connection.NetworkService, networkServiceEndpointName)
+	// TODO: Request tries forever, but what if the NSE is removed in the meantime?
+	// The recv will be blocked on the Request as well... Should be refactored. (Are client components thread safe to opt for async requests?)
 	err := networkServiceClient.Request(request)
 	fmnsc.networkServiceClients[networkServiceEndpointName] = networkServiceClient
 	if err != nil {
@@ -137,18 +155,18 @@ func (fmnsc *FullMeshNetworkServiceClient) prepareQuery() *registry.NetworkServi
 }
 
 // NewFullMeshNetworkServiceClient -
-func NewFullMeshNetworkServiceClient(config *Config, cc grpc.ClientConnInterface, additionalFunctionality ...networkservice.NetworkServiceClient) NetworkServiceClient {
+func NewFullMeshNetworkServiceClient(config *Config, nsmAPIClient *nsm.APIClient, additionalFunctionality ...networkservice.NetworkServiceClient) NetworkServiceClient {
 	fullMeshNetworkServiceClient := &FullMeshNetworkServiceClient{
 		config:                config,
-		networkServiceClient:  newClient(context.Background(), config.Name, cc, additionalFunctionality...),
+		networkServiceClient:  newClient(context.Background(), config.Name, nsmAPIClient, additionalFunctionality...),
 		networkServiceClients: make(map[string]*SimpleNetworkServiceClient),
 		nscIndex:              0,
 	}
 
 	fullMeshNetworkServiceClient.networkServiceEndpointRegistryClient = registrychain.NewNetworkServiceEndpointRegistryClient(
-		registryrefresh.NewNetworkServiceEndpointRegistryClient(),
+		registryrefresh.NewNetworkServiceEndpointRegistryClient(context.Background()),
 		registrysendfd.NewNetworkServiceEndpointRegistryClient(),
-		registry.NewNetworkServiceEndpointRegistryClient(cc),
+		registry.NewNetworkServiceEndpointRegistryClient(nsmAPIClient.GRPCClient),
 	)
 
 	return fullMeshNetworkServiceClient

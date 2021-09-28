@@ -1,3 +1,19 @@
+/*
+Copyright (c) 2021 Nordix Foundation
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package main
 
 import (
@@ -15,22 +31,27 @@ import (
 	"github.com/networkservicemesh/api/pkg/api/networkservice/payload"
 	"github.com/networkservicemesh/sdk-sriov/pkg/networkservice/common/mechanisms/vfio"
 	sriovtoken "github.com/networkservicemesh/sdk-sriov/pkg/networkservice/common/token"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/common/authorize"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/kernel"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/recvfd"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/mechanisms/sendfd"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/common/null"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/common/refresh"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/common/serialize"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/common/updatepath"
 	"github.com/networkservicemesh/sdk/pkg/networkservice/core/chain"
+	"github.com/networkservicemesh/sdk/pkg/networkservice/utils/metadata"
 	"github.com/nordix/meridio/pkg/client"
 	"github.com/nordix/meridio/pkg/configuration"
 	"github.com/nordix/meridio/pkg/endpoint"
+	"github.com/nordix/meridio/pkg/health"
 	"github.com/nordix/meridio/pkg/ipam"
 	linuxKernel "github.com/nordix/meridio/pkg/kernel"
 	"github.com/nordix/meridio/pkg/nsm"
 	"github.com/nordix/meridio/pkg/nsm/interfacemonitor"
 	"github.com/nordix/meridio/pkg/nsm/interfacename"
 	"github.com/nordix/meridio/pkg/nsm/ipcontext"
-	"github.com/nordix/meridio/pkg/nsp"
 	"github.com/nordix/meridio/pkg/proxy"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -55,6 +76,18 @@ func main() {
 	if err != nil {
 		logrus.Fatalf("%v", err)
 	}
+	logrus.Infof("rootConf: %+v", config)
+
+	healthChecker, err := health.NewChecker(8000)
+	if err != nil {
+		logrus.Fatalf("Unable to create Health checker: %v", err)
+	}
+	go func() {
+		err := healthChecker.Start()
+		if err != nil {
+			logrus.Fatalf("Unable to start Health checker: %v", err)
+		}
+	}()
 
 	proxySubnets, err := getProxySubnets(config)
 	if err != nil {
@@ -67,7 +100,7 @@ func main() {
 		logrus.Fatalf("Error creating link monitor: %+v", err)
 	}
 
-	p := proxy.NewProxy(config.VIPs, proxySubnets, netUtils)
+	p := proxy.NewProxy(proxySubnets, netUtils)
 
 	apiClientConfig := &nsm.Config{
 		Name:             config.Name,
@@ -81,6 +114,7 @@ func main() {
 	clientConfig := &client.Config{
 		Name:           config.Name,
 		RequestTimeout: config.RequestTimeout,
+		ConnectTo:      config.ConnectTo,
 	}
 	interfaceMonitorClient := interfacemonitor.NewClient(interfaceMonitor, p, netUtils)
 	client := getNSC(ctx, clientConfig, nsmAPIClient, p, interfaceMonitorClient)
@@ -98,17 +132,17 @@ func main() {
 		Labels:           labels,
 	}
 	interfaceMonitorServer := interfacemonitor.NewServer(interfaceMonitor, p, netUtils)
-	ep := startNSE(ctx, endpointConfig, nsmAPIClient, p, interfaceMonitorServer, config.NSPService)
+	ep := startNSE(ctx, endpointConfig, nsmAPIClient, p, interfaceMonitorServer)
 	defer ep.Delete()
 
-	configWatcher := make(chan *configuration.Config, 10)
-	configurationWatcher := configuration.NewWatcher(config.ConfigMapName, config.Namespace, configWatcher)
+	configWatcher := make(chan *configuration.OperatorConfig)
+	configurationWatcher := configuration.NewOperatorWatcher(config.ConfigMapName, config.Namespace, configWatcher)
 	go configurationWatcher.Start()
 
 	for {
 		select {
 		case config := <-configWatcher:
-			p.SetVIPs(config.VIPs)
+			p.SetVIPs(configuration.AddrListFromVipConfig(config.VIPs))
 		case <-ctx.Done():
 			return
 		}
@@ -142,6 +176,10 @@ func getNSC(ctx context.Context,
 	interfaceMonitorClient networkservice.NetworkServiceClient) client.NetworkServiceClient {
 
 	networkServiceClient := chain.NewNetworkServiceClient(
+		updatepath.NewClient(config.Name),
+		serialize.NewClient(),
+		refresh.NewClient(ctx),
+		metadata.NewClient(),
 		sriovtoken.NewClient(),
 		mechanisms.NewClient(map[string]networkservice.NetworkServiceClient{
 			vfiomech.MECHANISM:   chain.NewNetworkServiceClient(vfio.NewClient()),
@@ -150,9 +188,10 @@ func getNSC(ctx context.Context,
 		interfacename.NewClient("nsc", &interfacename.RandomGenerator{}),
 		ipcontext.NewClient(p),
 		interfaceMonitorClient,
+		authorize.NewClient(),
 		sendfd.NewClient(),
 	)
-	fullMeshClient := client.NewFullMeshNetworkServiceClient(config, nsmAPIClient.GRPCClient, networkServiceClient)
+	fullMeshClient := client.NewFullMeshNetworkServiceClient(config, nsmAPIClient, networkServiceClient)
 	return fullMeshClient
 }
 
@@ -179,9 +218,9 @@ func startNSE(ctx context.Context,
 	config *endpoint.Config,
 	nsmAPIClient *nsm.APIClient,
 	p *proxy.Proxy,
-	interfaceMonitorServer networkservice.NetworkServiceServer,
-	nspService string) *endpoint.Endpoint {
+	interfaceMonitorServer networkservice.NetworkServiceServer) *endpoint.Endpoint {
 
+	logrus.Infof("startNSE")
 	responderEndpoint := []networkservice.NetworkServiceServer{
 		recvfd.NewServer(),
 		mechanisms.NewServer(map[string]networkservice.NetworkServiceServer{
@@ -191,7 +230,6 @@ func startNSE(ctx context.Context,
 		interfacename.NewServer("nse", &interfacename.RandomGenerator{}),
 		ipcontext.NewServer(p),
 		interfaceMonitorServer,
-		nsp.NewNSPEndpoint(nspService),
 		sendfd.NewServer(),
 	}
 

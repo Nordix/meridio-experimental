@@ -1,0 +1,73 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.applicationName }}
+  labels:
+    app: {{ .Values.applicationName }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.applicationName }}
+  replicas: 4
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.applicationName }}
+    spec:
+      serviceAccountName: meridio
+      containers:
+        - name: ctraffic
+          image: {{ .Values.registry }}/{{ .Values.organization }}/{{ .Values.ctraffic.image }}:{{ .Values.ctraffic.version }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          args:
+            - ./target-client connect -ns {{ .Values.networkService }} -t {{ .Values.default.trench.name }} ; ./target-client request -ns {{ .Values.networkService }} -t {{ .Values.default.trench.name  }} ; ./ctraffic -server -address [::]:5000
+          command:
+            - /bin/bash
+            - -c
+          securityContext:
+            privileged: true
+        - name: target
+          image: {{ .Values.registry }}/{{ .Values.organization }}/{{ .Values.target.image }}:{{ .Values.target.version }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: unix:///run/spire/sockets/agent.sock
+            - name: NSM_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: NSM_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: NSM_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NSM_CONFIG_MAP_NAME
+              value: {{ .Values.configMapName }}
+            - name: NSM_CONNECT_TO
+              value: unix:///var/lib/networkservicemesh/nsm.io.sock
+            - name: NSM_NSP_SERVICE_NAME
+              value: {{ .Values.nsp.serviceName }}
+            - name: NSM_NSP_SERVICE_PORT
+              value: "{{ .Values.nsp.targetPort }}"
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+            - name: nsm-socket
+              mountPath: /var/lib/networkservicemesh
+              readOnly: true
+          securityContext:
+            privileged: true
+      volumes:
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory
+        - name: nsm-socket
+          hostPath:
+            path: /var/lib/networkservicemesh
+            type: DirectoryOrCreate
