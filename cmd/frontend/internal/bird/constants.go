@@ -14,8 +14,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package stream
+package bird
 
 const (
-	maxNumberOfTargets = 100
+	NoProtocolsLog     string = "No protocols match"
+	ReconfigInProgress string = "Reconfiguration in progress"
+	Reconfigured       string = "Reconfigured"
+	ConfigurationOk    string = "Configuration OK"
+)
+
+const (
+	BGP    string = "BGP"
+	STATIC string = "Static"
+)
+
+const (
+	_ = iota
+	protoName
+	protoProto
+	protoState
+	protoInfo
+	protoItf
+	protoNbr
+	bfdSessions
 )

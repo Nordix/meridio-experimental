@@ -18,17 +18,22 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
 
 	nested "github.com/antonfisher/nested-logrus-formatter"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/nordix/meridio/pkg/configuration"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+
+	nspAPI "github.com/nordix/meridio/api/nsp/v1"
+	"github.com/nordix/meridio/cmd/frontend/internal/env"
+	"github.com/nordix/meridio/cmd/frontend/internal/frontend"
 )
 
-type Config struct {
+/* type Config struct {
 	VRRPs             []string `default:"" desc:"VRRP IP addresses to be used as next-hops for static default routes" envconfig:"VRRPS"`
 	ExternalInterface string   `default:"ext-vlan" desc:"External interface to start BIRD on" split_words:"true"`
 	BirdConfigPath    string   `default:"/etc/bird" desc:"Path to place bird config files" split_words:"true"`
@@ -45,7 +50,7 @@ type Config struct {
 	Namespace         string   `default:"default" desc:"Namespace the pod is running on" split_words:"true"`
 	ConfigMapName     string   `default:"meridio-configuration" desc:"Name of the ConfigMap containing the configuration" split_words:"true"`
 	NSPService        string   `default:"nsp-service-trench-a:7778" desc:"IP (or domain) and port of the NSP Service" split_words:"true"`
-}
+} */
 
 func main() {
 	ctx, cancel := signal.NotifyContext(
@@ -61,7 +66,7 @@ func main() {
 	logrus.SetLevel(logrus.DebugLevel)
 	logrus.SetFormatter(&nested.Formatter{})
 
-	config := &Config{}
+	config := &env.Config{}
 	if err := envconfig.Usage("nfe", config); err != nil {
 		logrus.Fatal(err)
 	}
@@ -70,7 +75,7 @@ func main() {
 	}
 	logrus.Infof("rootConf: %+v", config)
 
-	fe := NewFrontEndService(config)
+	fe := frontend.NewFrontEndService(config)
 	defer fe.CleanUp()
 
 	/* if err := fe.AddVIPRules(); err != nil {
@@ -97,24 +102,10 @@ func main() {
 		logrus.Fatalf("Failed to start monitor: %v", err)
 	}
 
-	configWatcher := make(chan *configuration.OperatorConfig)
-	configurationWatcher := configuration.NewOperatorWatcher(config.ConfigMapName, config.Namespace, configWatcher)
-	go configurationWatcher.Start()
+	go watchConfig(ctx, cancel, config, fe)
 
-	for {
-		select {
-		case c, ok := <-configWatcher:
-			if ok {
-				logrus.Infof("FE config change event")
-				if err := fe.SetNewConfig(c); err != nil {
-					cancel()
-				}
-			}
-		case <-ctx.Done():
-			logrus.Warnf("FE shutting down")
-			return
-		}
-	}
+	<-ctx.Done()
+	logrus.Warnf("FE shutting down")
 }
 
 func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan error) {
@@ -133,4 +124,52 @@ func exitOnErrCh(ctx context.Context, cancel context.CancelFunc, errCh <-chan er
 		}
 		cancel()
 	}(ctx, errCh)
+}
+
+func watchConfig(ctx context.Context, cancel context.CancelFunc, c *env.Config, fe *frontend.FrontEndService) {
+	if err := fe.WaitStart(ctx); err != nil {
+		logrus.Errorf("Wait start: %v", err)
+		cancel()
+	}
+	conn, err := grpc.Dial(c.NSPService, grpc.WithInsecure(),
+		grpc.WithDefaultCallOptions(
+			grpc.WaitForReady(true),
+		))
+	if err != nil {
+		logrus.Errorf("grpc.Dial err: %v", err)
+		cancel()
+	}
+	configurationManagerClient := nspAPI.NewConfigurationManagerClient(conn)
+	attractorToWatch := &nspAPI.Attractor{
+		Name: c.AttractorName,
+		Trench: &nspAPI.Trench{
+			Name: c.TrenchName,
+		},
+	}
+	if err := watchAttractor(ctx, configurationManagerClient, attractorToWatch, fe); err != nil {
+		logrus.Errorf("Attractor watcher: %v", err)
+		cancel()
+	}
+}
+
+func watchAttractor(ctx context.Context, cli nspAPI.ConfigurationManagerClient, toWatch *nspAPI.Attractor, fe *frontend.FrontEndService) error {
+	watchAttractor, err := cli.WatchAttractor(ctx, toWatch)
+	if err != nil {
+		return err
+	}
+	for {
+		attractorResponse, err := watchAttractor.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			logrus.Infof("Attractor watcher closing down")
+			return err
+		}
+		logrus.Infof("Attractor config change event")
+		if err := fe.SetNewConfig(attractorResponse.Attractors); err != nil {
+			return err
+		}
+	}
+	return nil
 }
